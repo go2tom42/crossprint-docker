@@ -413,3 +413,39 @@ def test_a_bambu_target_keeps_the_sources_version():
         original = json.loads(source.get_text("Metadata/project_settings.config"))
 
     assert config["version"] == original["version"]
+
+
+def test_a_project_with_embossed_text_converts():
+    """Snapmaker Orca and PrusaSlicer write embossed-text objects as
+    <slic3rpe:shape/> and <slic3rpe:text/> in model_settings.config without
+    ever declaring xmlns:slic3rpe on the root. That is not well-formed XML, so
+    a strict parser refuses the whole document -- "unbound prefix" -- and a
+    project containing a single piece of embossed text failed to convert at
+    all. The slicers read their own output happily, which is how it ships.
+    """
+    from core.model_settings import ModelSettings, declare_unbound_prefixes
+
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<config>\n"
+        '  <object id="1">\n'
+        '    <metadata key="extruder" value="2"/>\n'
+        '    <slic3rpe:shape scale="1" depth="3"/>\n'
+        '    <slic3rpe:text text="2" style_name="SWISS"/>\n'
+        "  </object>\n"
+        "</config>\n"
+    )
+
+    settings = ModelSettings.parse(xml)  # must not raise
+    assert settings.objects[0].extruder == "2"
+
+    out = settings.to_xml()
+    assert "slic3rpe:shape" in out and "slic3rpe:text" in out, "the elements must round-trip"
+    assert "xmlns:slic3rpe" in out, "and the output must be well-formed where the input was not"
+
+
+def test_a_document_that_declares_its_prefixes_is_left_alone():
+    from core.model_settings import declare_unbound_prefixes
+
+    xml = '<config xmlns:x="urn:already"><x:thing/></config>'
+    assert declare_unbound_prefixes(xml) == xml

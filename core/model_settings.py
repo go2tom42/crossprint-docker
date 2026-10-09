@@ -29,10 +29,63 @@ not a separate copy of the data.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from xml.etree import ElementTree as ET
 
 XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>\n'
+
+# Namespace URIs for prefixes real files use without declaring. Taking the
+# real URI where it is known keeps the document meaning what its author meant;
+# anything else gets a placeholder, which is enough to parse and round-trip.
+_KNOWN_NAMESPACE_URIS = {
+    "slic3rpe": "http://schemas.slic3r.org/3mf/2017/06",
+    "p": "http://schemas.microsoft.com/3dmanufacturing/production/2015/06",
+}
+
+_PREFIX_IN_TAG = re.compile(r"<\s*([A-Za-z_][\w.-]*):")
+_PREFIX_IN_ATTR = re.compile(r"\s([A-Za-z_][\w.-]*):[\w.-]+\s*=")
+_DECLARED_PREFIX = re.compile(r"xmlns:([A-Za-z_][\w.-]*)\s*=")
+_ROOT_START_TAG = re.compile(r"<\s*([A-Za-z_][\w.-]*)((?:\s[^<>]*)?)(/?)>")
+
+
+def declare_unbound_prefixes(xml_text: str) -> str:
+    """Declare namespace prefixes the document uses but never declares.
+
+    Snapmaker Orca and PrusaSlicer write embossed-text objects as
+    `<slic3rpe:shape .../>` and `<slic3rpe:text .../>` inside
+    model_settings.config without ever declaring `xmlns:slic3rpe` on the root.
+    That is not well-formed XML, and a strict parser refuses the whole
+    document -- "unbound prefix" -- so a project containing a single piece of
+    embossed text failed to convert at all. The slicers read their own output
+    happily, which is how it ships.
+
+    Rather than giving up or throwing the elements away, the missing
+    declarations are added to the root element before parsing, and the
+    prefixes registered so serialising puts them back verbatim. The round trip
+    therefore gains an `xmlns:` declaration on the root and changes nothing
+    else -- the output is the same document, now well-formed.
+    """
+    used = set(_PREFIX_IN_TAG.findall(xml_text)) | set(_PREFIX_IN_ATTR.findall(xml_text))
+    used.discard("xmlns")
+    missing = sorted(used - set(_DECLARED_PREFIX.findall(xml_text)))
+    if not missing:
+        return xml_text
+
+    match = _ROOT_START_TAG.search(xml_text)
+    if match is None:
+        return xml_text  # nothing that looks like a root element; let the parser report it
+
+    declarations = ""
+    for prefix in missing:
+        uri = _KNOWN_NAMESPACE_URIS.get(prefix, f"urn:crossprint:undeclared:{prefix}")
+        # So serialising writes `slic3rpe:shape` again rather than `ns0:shape`.
+        ET.register_namespace(prefix, uri)
+        declarations += f' xmlns:{prefix}="{uri}"'
+
+    tag, attrs, self_closing = match.groups()
+    replacement = f"<{tag}{attrs}{declarations}{self_closing}>"
+    return xml_text[: match.start()] + replacement + xml_text[match.end() :]
 
 
 @dataclass
@@ -134,7 +187,7 @@ class ModelSettings:
 
     @classmethod
     def parse(cls, xml_text: str) -> ModelSettings:
-        return cls(root=Node.from_element(ET.fromstring(xml_text)))
+        return cls(root=Node.from_element(ET.fromstring(declare_unbound_prefixes(xml_text))))
 
     @property
     def objects(self) -> list[ObjectView]:
