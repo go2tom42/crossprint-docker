@@ -177,3 +177,48 @@ def test_remap_object_extruders_actually_rewrites_values():
     ms = ModelSettings.parse(xml)
     remap_object_extruders(ms, {2: 5})
     assert ms.objects[0].extruder == "5"
+
+
+# -- material routing across extruders -----------------------------------
+
+
+def test_a_material_the_first_extruder_refuses_moves_to_the_second():
+    """H2C declares unprintable_filament_types ["TPU", "PPS-CF,PPA-CF"]: its
+    first extruder will not print TPU. Snapmaker U1 has no extruder groups, so
+    a U1 project maps every slot to extruder 1 and that came across verbatim --
+    a six-colour project with TPU in slot 6 arrived asking extruder 1 to print
+    TPU."""
+    from convert.color_mapping import assign_extruders
+
+    machine = {"unprintable_filament_types": ["TPU", "PPS-CF,PPA-CF"]}
+    mapping, rerouted = assign_extruders(["PLA"] * 5 + ["TPU"], machine, 6)
+
+    assert mapping == ["1", "1", "1", "1", "1", "2"]
+    assert rerouted == [(6, "TPU", "2")]
+
+
+def test_everything_the_default_extruder_accepts_stays_there():
+    """Spreading filaments across extruders changes tool-change behaviour and
+    purge volumes; it is the user's call, not a conversion's."""
+    from convert.color_mapping import assign_extruders
+
+    machine = {"unprintable_filament_types": ["TPU", "PPS-CF,PPA-CF"]}
+    mapping, rerouted = assign_extruders(["PLA", "PETG", "ABS"], machine, 3)
+
+    assert mapping == ["1", "1", "1"] and rerouted == []
+
+
+def test_a_material_no_extruder_accepts_is_left_where_it_was():
+    from convert.color_mapping import assign_extruders
+
+    machine = {"unprintable_filament_types": ["TPU", "TPU"]}
+    mapping, rerouted = assign_extruders(["TPU"], machine, 1)
+
+    assert mapping == ["1"] and rerouted == []
+
+
+def test_a_single_hotend_target_declares_no_restrictions():
+    from convert.color_mapping import assign_extruders
+
+    mapping, rerouted = assign_extruders(["TPU", "PLA"], {}, 2)
+    assert mapping == ["1", "1"] and rerouted == []

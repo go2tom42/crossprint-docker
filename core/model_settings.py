@@ -216,3 +216,26 @@ class ModelSettings:
         ET.indent(el, space="  ")
         body = ET.tostring(el, encoding="unicode")
         return XML_DECLARATION + body + "\n"
+
+
+def set_plate_filament_maps(settings: ModelSettings, filament_map: list[str]) -> int:
+    """Point every plate's `filament_maps` at the same extruder assignment.
+
+    Each `<plate>` carries its own copy, space-separated, and the slicer reads
+    it per plate rather than falling back to the project-wide `filament_map`.
+    Leaving the plates saying "1 1 1 1 1 1" while the project routes a TPU slot
+    to extruder 2 is the two disagreeing about the same thing, and the plate is
+    the one that wins.
+
+    Returns how many plates were updated.
+    """
+    value = " ".join(filament_map)
+    updated = 0
+    for plate in (c for c in settings.root.children if c.tag == "plate"):
+        for node in plate.children:
+            if node.tag == "metadata" and node.attrib.get("key") == "filament_maps":
+                if node.attrib.get("value") != value:
+                    node.attrib["value"] = value
+                    updated += 1
+                break
+    return updated

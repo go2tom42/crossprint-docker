@@ -24,12 +24,13 @@ from convert.filament_variants import expand_per_variant_options
 from convert.layer_heights import clamp_layer_height_profile
 from convert.paint_transfer import remap_paint_colors
 from convert.plate_layout import bed_size, relayout_for_target_bed
+from convert.project_identity import declare_bambu_project, sanitize_bambu_plate_names
 from convert.purge_matrix import flush_multiplier_for_target, reshape_purge_matrix
 from convert.report import ChangeReport
 from convert.settings_diff import compute_different_settings_to_system
 from core.archive import PathOrStream, ThreeMFArchive
 from core.field_policy import FieldPolicy
-from core.model_settings import ModelSettings
+from core.model_settings import ModelSettings, set_plate_filament_maps
 from core.preset_resolver import PresetLibrary, flatten
 from core.shapes import harmonize_shapes
 from core.slicer_owned import strip_slicer_owned
@@ -681,10 +682,49 @@ def convert(source_path: PathOrStream, target: str) -> tuple[ThreeMFArchive, Con
 
     archive.set_text("Metadata/project_settings.config", ProjectSettings(data=new_config).to_json())
 
+    # Bambu Studio's importer only loads a project's configuration and plate
+    # membership when 3dmodel.model declares an Application starting with
+    # "BambuStudio-". A Snapmaker source says "Snapmaker_Orca-2.4.0", so the
+    # geometry loaded and the plates and settings did not -- objects scattered
+    # across one plate with every setting at the target's default. It is a
+    # dialect marker, not a claim of authorship, so the original is kept beside
+    # it as Crossprint:SourceApplication.
+    if target != "u1" and declare_bambu_project(archive):
+        result.note(
+            "files",
+            "Declared the Bambu project dialect so plates and settings load",
+            detail="Bambu Studio reads project config and plate membership only from a file whose "
+            "Application metadata starts with BambuStudio-. The source's own value is kept as "
+            "Crossprint:SourceApplication.",
+        )
+
     model_settings_text = archive.get_text("Metadata/model_settings.config")
     if model_settings_text is not None:
         ms = ModelSettings.parse(model_settings_text)
         remap_object_extruders(ms, mapping.slot_map)
+        if target != "u1":
+            renamed = sanitize_bambu_plate_names(ms)
+            if renamed:
+                result.note(
+                    "geometry",
+                    f"Renamed {len(renamed)} plate(s) Bambu will not accept",
+                    detail="Bambu rejects filename-reserved characters in a plate's display name; "
+                    "this project had a plate called \"Lid fillers / Plexiglas model\".",
+                    items=renamed,
+                )
+        # Each plate carries its own copy of the extruder assignment and the
+        # slicer reads that one, so a plate left saying every slot feeds
+        # extruder 1 overrides a project that routed TPU to extruder 2.
+        plate_map = new_config.get("filament_map")
+        if isinstance(plate_map, list) and plate_map:
+            updated = set_plate_filament_maps(ms, plate_map)
+            if updated:
+                result.report.add(
+                    "colors",
+                    f"Updated the extruder assignment on {updated} plate(s)",
+                    detail="Each plate stores its own copy, and the slicer reads the plate's rather "
+                    "than the project's.",
+                )
         archive.set_text("Metadata/model_settings.config", ms.to_xml())
 
     # Object coordinates are absolute and laid out from the *source* bed. Move

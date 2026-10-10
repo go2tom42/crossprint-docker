@@ -282,10 +282,18 @@ def map_colors_to_bambu(
             "the AMS slot assignment before printing."
         )
 
+    filament_map, rerouted = assign_extruders(filament_type, flat_machine, count)
+    for slot, material, extruder in rerouted:
+        warnings.append(
+            f"{material} in slot {slot} was routed to extruder {extruder}: {target_model}'s first "
+            f"extruder cannot print {material}. The source printer has no extruder groups, so every "
+            "slot came across pointing at the first one."
+        )
+
     target_fields = {
         "master_extruder_id": flat_machine.get("master_extruder_id", "2"),
         "physical_extruder_map": routing["physical_extruder_map"],
-        "filament_map": ["1"] * count,
+        "filament_map": filament_map,
         "extruder_ams_count": routing["extruder_ams_count"],
         **_VORTEK_VERIFIED_MACHINE_FIELDS,
     }
@@ -317,3 +325,43 @@ def remap_object_extruders(model_settings: ModelSettings, slot_map: dict[int, in
                 old = int(v)
                 if old in slot_map:
                     part.set_metadata("extruder", str(slot_map[old]))
+
+
+def assign_extruders(
+    filament_type: list[str], flat_machine: dict, count: int
+) -> tuple[list[str], list[tuple[int, str, str]]]:
+    """Which physical extruder each filament slot should feed from.
+
+    A dual-hotend Bambu declares, per extruder, the materials it cannot print:
+    H2C's `unprintable_filament_types` is `["TPU", "PPS-CF,PPA-CF"]` -- the
+    first extruder refuses TPU, the second refuses the carbon-filled nylons.
+
+    Snapmaker U1 has no extruder groups at all; every toolhead is equivalent,
+    so a U1 project maps every slot to extruder 1 and conversion used to carry
+    that over verbatim. A six-colour project whose sixth filament is TPU then
+    arrived on an H2C asking extruder 1 to print TPU, which it will not do.
+
+    So a slot whose material the default extruder refuses is moved to one that
+    accepts it. Only that case is touched: everything else stays on extruder 1,
+    matching the verified reference files, because spreading filaments across
+    extruders changes tool-change behaviour and purge volumes and is the user's
+    call, not a conversion's.
+
+    Returns the map and the slots that had to move, so conversion can say so.
+    """
+    raw = flat_machine.get("unprintable_filament_types") or []
+    refuses = [{m.strip() for m in str(entry).split(",") if m.strip()} for entry in raw]
+
+    mapping: list[str] = []
+    rerouted: list[tuple[int, str, str]] = []
+    for slot in range(count):
+        material = filament_type[slot] if slot < len(filament_type) else ""
+        chosen = "1"
+        if refuses and material and material in refuses[0]:
+            for extruder in range(1, len(refuses)):
+                if material not in refuses[extruder]:
+                    chosen = str(extruder + 1)
+                    rerouted.append((slot + 1, material, chosen))
+                    break
+        mapping.append(chosen)
+    return mapping, rerouted
